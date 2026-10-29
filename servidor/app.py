@@ -1,11 +1,15 @@
 """API del inventario de red.
 
-Fase 3.1: endpoints de lectura del inventario (aún sin autenticación).
+Fase 3.2: autenticación. Usuario y clave -> token temporal -> acceso al inventario.
 """
 import json
 import os
+import secrets
+import time
+from functools import wraps
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
+from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
 
@@ -15,11 +19,38 @@ CERT = os.path.join(BASE, "certs", "cert.pem")
 CLAVE = os.path.join(BASE, "certs", "key.pem")
 ARCHIVO_DATOS = os.path.join(BASE, "dispositivos.json")
 
+# Las claves vienen del entorno: nunca se escriben en el código ni en Git.
+CLAVE_ADMIN = os.environ.get("API_CLAVE_ADMIN")
+CLAVE_LECTOR = os.environ.get("API_CLAVE_LECTOR")
+if not CLAVE_ADMIN or not CLAVE_LECTOR:
+    raise SystemExit("Define API_CLAVE_ADMIN y API_CLAVE_LECTOR antes de iniciar.")
+
+# Solo se guarda el hash de la clave, no la clave en texto plano.
+USUARIOS = {
+    "admin": {"hash": generate_password_hash(CLAVE_ADMIN, method="pbkdf2:sha256"), "rol": "admin"},
+    "lector": {"hash": generate_password_hash(CLAVE_LECTOR, method="pbkdf2:sha256"), "rol": "lector"},
+}
+
+DURACION_TOKEN = 900  # segundos (15 minutos)
+TOKENS = {}  # token -> {"usuario", "rol", "expira"}; vive en memoria
+
 
 def cargar_dispositivos():
     """Lee el inventario desde el archivo JSON y lo devuelve como lista."""
     with open(ARCHIVO_DATOS, encoding="utf-8") as archivo:
         return json.load(archivo)
+
+
+def requiere_token(funcion):
+    """Decorador: solo deja pasar si la petición trae un token válido y vigente."""
+    @wraps(funcion)
+    def envoltura(*args, **kwargs):
+        token = request.headers.get("X-Auth-Token")
+        datos = TOKENS.get(token)
+        if datos is None or datos["expira"] < time.time():
+            return jsonify({"error": "Token ausente, inválido o vencido"}), 401
+        return funcion(*args, **kwargs)
+    return envoltura
 
 
 @app.errorhandler(404)
@@ -30,11 +61,33 @@ def no_encontrado(_error):
 
 @app.route("/api/v1/salud")
 def salud():
-    """Endpoint de salud: responde si el servicio está activo."""
+    """Endpoint de salud: público, responde si el servicio está activo."""
     return jsonify({"estado": "ok"})
 
 
+@app.route("/api/v1/auth/token", methods=["POST"])
+def emitir_token():
+    """Recibe usuario y clave (Basic Auth) y devuelve un token temporal."""
+    credenciales = request.authorization
+    cabecera = {"WWW-Authenticate": 'Basic realm="inventario"'}
+    if credenciales is None:
+        return jsonify({"error": "Se requieren credenciales (Basic Auth)"}), 401, cabecera
+
+    usuario = USUARIOS.get(credenciales.username)
+    if usuario is None or not check_password_hash(usuario["hash"], credenciales.password or ""):
+        return jsonify({"error": "Usuario o clave incorrectos"}), 401, cabecera
+
+    token = secrets.token_hex(16)
+    TOKENS[token] = {
+        "usuario": credenciales.username,
+        "rol": usuario["rol"],
+        "expira": time.time() + DURACION_TOKEN,
+    }
+    return jsonify({"token": token, "expira_en": DURACION_TOKEN, "rol": usuario["rol"]})
+
+
 @app.route("/api/v1/dispositivos")
+@requiere_token
 def listar_dispositivos():
     """Devuelve todos los dispositivos del inventario."""
     dispositivos = cargar_dispositivos()
@@ -42,6 +95,7 @@ def listar_dispositivos():
 
 
 @app.route("/api/v1/dispositivos/<int:id_dispositivo>")
+@requiere_token
 def obtener_dispositivo(id_dispositivo):
     """Devuelve un dispositivo por su id, o 404 si no existe."""
     for dispositivo in cargar_dispositivos():
