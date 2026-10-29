@@ -137,6 +137,32 @@ def actualizar_dispositivo(id_dispositivo):
             return jsonify(dispositivo)
     return jsonify({"error": "Dispositivo no encontrado"}), 404
 
+@app.errorhandler(405)
+def metodo_no_permitido(_error):
+    """Responde en JSON cuando el método HTTP no está permitido en esa ruta."""
+    return jsonify({"error": "Método no permitido"}), 405
+
+
+@app.errorhandler(500)
+def error_interno(_error):
+    """Responde en JSON ante un fallo inesperado.
+
+    El detalle técnico queda solo en el log del servidor, no se le muestra al cliente.
+    """
+    return jsonify({"error": "Error interno del servidor"}), 500
+
+
+@app.route("/api/v1/falla")
+def falla():
+    """Endpoint de práctica: falla siempre, para probar errores 5xx."""
+    raise RuntimeError("Fallo simulado para pruebas")
+
+
+@app.route("/api/v1/lento")
+def lento():
+    """Endpoint de práctica: tarda 5 segundos, para probar timeouts."""
+    time.sleep(5)
+    return jsonify({"estado": "respuesta tardía"})
 
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=5000, ssl_context=(CERT, CLAVE))
