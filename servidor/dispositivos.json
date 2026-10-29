@@ -1,0 +1,10 @@
+[
+  {"id": 1, "hostname": "sw-core-01", "ip": "10.10.1.1", "plataforma": "C9300", "version": "17.3.4", "estado": "Reachable"},
+  {"id": 2, "hostname": "sw-acceso-02", "ip": "10.10.1.2", "plataforma": "C9200", "version": "17.3.4", "estado": "Reachable"},
+  {"id": 3, "hostname": "rtr-borde-01", "ip": "10.10.1.254", "plataforma": "ISR4331", "version": "16.9.5", "estado": "Reachable"},
+  {"id": 4, "hostname": "sw-suc-norte-01", "ip": "10.20.1.1", "plataforma": "C9200", "version": "17.3.4", "estado": "Unreachable"},
+  {"id": 5, "hostname": "rtr-suc-norte-01", "ip": "10.20.1.254", "plataforma": "ISR4331", "version": "17.3.4", "estado": "Reachable"},
+  {"id": 6, "hostname": "sw-suc-sur-01", "ip": "10.30.1.1", "plataforma": "C9200", "version": "16.12.4", "estado": "Reachable"},
+  {"id": 7, "hostname": "ap-almacen-01", "ip": "10.10.2.10", "plataforma": "C9120", "version": "17.3.4", "estado": "Reachable"},
+  {"id": 8, "hostname": "sw-sin-registro-01", "ip": "10.99.1.1", "plataforma": "C9200", "version": "17.3.4", "estado": "Reachable"}
+]
