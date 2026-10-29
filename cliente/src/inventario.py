@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Cliente del inventario de red (Fase 5.2).
+"""Cliente del inventario de red (Fase 6).
 
 Lee configuración (YAML), sedes (CSV) y políticas (XML); consulta la API por
-HTTPS, cruza las fuentes, detecta problemas y guarda un reporte JSON y CSV.
+HTTPS con manejo de errores y reintentos, cruza las fuentes, detecta problemas
+y guarda un reporte JSON y CSV.
 """
 import csv
 import json
 import os
 import sys
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
@@ -18,6 +20,30 @@ import yaml
 CARPETA = os.path.dirname(os.path.abspath(__file__))
 RAIZ = os.path.normpath(os.path.join(CARPETA, "..", ".."))
 CARPETA_DATOS = os.path.join(RAIZ, "cliente", "data")
+
+CAMPOS_OBLIGATORIOS = ("hostname", "ip", "plataforma", "version", "estado")
+
+# Qué significa cada código HTTP y cómo resolverlo.
+ERRORES_HTTP = {
+    400: ("Solicitud inválida",
+          "Revisa el cuerpo y los parámetros que se enviaron."),
+    401: ("No autenticado",
+          "Usuario o clave incorrectos, o token vencido: vuelve a pedir un token."),
+    403: ("Sin permiso",
+          "El rol del usuario no permite esta acción: usa un usuario con el rol adecuado."),
+    404: ("No encontrado",
+          "Revisa la URL o el id del recurso."),
+    405: ("Método no permitido",
+          "Ese endpoint no acepta ese método HTTP: revisa la documentación de la API."),
+    500: ("Error interno del servidor",
+          "El fallo es del servidor: reintenta más tarde y avisa al responsable."),
+    503: ("Servicio no disponible",
+          "El servicio está caído o saturado: reintenta más tarde."),
+}
+
+
+class ErrorAPI(Exception):
+    """Error al consumir la API, con un mensaje listo para mostrar a una persona."""
 
 
 # ---------- Lectura de archivos locales ----------
@@ -46,28 +72,112 @@ def leer_politicas(ruta):
 
 
 # ---------- Consultas a la API ----------
+def describir_error_http(respuesta):
+    """Arma un mensaje claro a partir de una respuesta HTTP de error."""
+    codigo = respuesta.status_code
+    titulo, solucion = ERRORES_HTTP.get(
+        codigo, ("Error HTTP", "Consulta la documentación de la API.")
+    )
+    detalle = ""
+    try:
+        datos = respuesta.json()
+        if isinstance(datos, dict):
+            detalle = datos.get("error", "")
+    except ValueError:
+        pass
+    return (f"HTTP {codigo} - {titulo}. "
+            f"Detalle del servidor: {detalle or 'sin detalle'}. "
+            f"Solución: {solucion}")
+
+
+def llamar_api(api, metodo, ruta, token=None, auth=None, cuerpo=None):
+    """Hace una petición a la API y devuelve el JSON de la respuesta.
+
+    - Reintenta solo ante fallos que pueden ser pasajeros: sin conexión,
+      timeout y errores 5xx. Los 4xx no se reintentan.
+    - Si no lo logra, lanza ErrorAPI con un mensaje claro.
+    """
+    url = api["url_base"] + ruta
+    cabeceras = {"X-Auth-Token": token} if token else {}
+    total_intentos = api.get("reintentos", 2) + 1
+    espera = api.get("espera_reintento", 1)
+
+    for intento in range(1, total_intentos + 1):
+        ultimo = intento == total_intentos
+        try:
+            respuesta = requests.request(
+                metodo,
+                url,
+                headers=cabeceras,
+                auth=auth,
+                json=cuerpo,
+                verify=api["certificado"],
+                timeout=api["timeout"],
+            )
+        except requests.exceptions.SSLError:
+            # Debe ir antes que ConnectionError: SSLError es un tipo de ConnectionError.
+            raise ErrorAPI(
+                "El certificado HTTPS de la API no es de confianza. "
+                "Solución: verifica la ruta del certificado en config.yaml."
+            )
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as error:
+            if isinstance(error, requests.exceptions.Timeout):
+                motivo = "se agotó el tiempo de espera"
+            else:
+                motivo = "no se pudo conectar con la API"
+            if ultimo:
+                raise ErrorAPI(
+                    f"Fallo de red: {motivo} tras {total_intentos} intentos. "
+                    "Solución: revisa que el servidor esté encendido y la red de la VM."
+                )
+            print(f"  [intento {intento}/{total_intentos}] {motivo}; "
+                  f"reintentando en {espera} s...", file=sys.stderr)
+            time.sleep(espera)
+            continue
+
+        if respuesta.status_code >= 500 and not ultimo:
+            print(f"  [intento {intento}/{total_intentos}] el servidor respondió "
+                  f"{respuesta.status_code}; reintentando en {espera} s...",
+                  file=sys.stderr)
+            time.sleep(espera)
+            continue
+
+        if respuesta.ok:
+            try:
+                return respuesta.json()
+            except ValueError:
+                raise ErrorAPI("La API respondió algo que no es JSON válido.")
+        raise ErrorAPI(describir_error_http(respuesta))
+
+
 def obtener_token(api, usuario, clave):
     """Pide un token a la API con Basic Auth y lo devuelve como texto."""
-    respuesta = requests.post(
-        api["url_base"] + "/auth/token",
-        auth=(usuario, clave),
-        verify=api["certificado"],
-        timeout=api["timeout"],
-    )
-    respuesta.raise_for_status()
-    return respuesta.json()["token"]
+    datos = llamar_api(api, "POST", "/auth/token", auth=(usuario, clave))
+    if not isinstance(datos, dict) or "token" not in datos:
+        raise ErrorAPI("La respuesta de la API no trae un token.")
+    return datos["token"]
 
 
 def obtener_dispositivos(api, token):
     """Pide el inventario a la API usando el token y devuelve la lista."""
-    respuesta = requests.get(
-        api["url_base"] + "/dispositivos",
-        headers={"X-Auth-Token": token},
-        verify=api["certificado"],
-        timeout=api["timeout"],
-    )
-    respuesta.raise_for_status()
-    return respuesta.json()["dispositivos"]
+    datos = llamar_api(api, "GET", "/dispositivos", token=token)
+    if not isinstance(datos, dict) or "dispositivos" not in datos:
+        raise ErrorAPI("La respuesta de la API no tiene el formato esperado.")
+    return datos["dispositivos"]
+
+
+def validar_dispositivos(dispositivos):
+    """Descarta los dispositivos a los que les faltan campos obligatorios."""
+    validos = []
+    for d in dispositivos:
+        faltan = [campo for campo in CAMPOS_OBLIGATORIOS if campo not in d]
+        if faltan:
+            print(f"  Aviso: dispositivo ignorado, faltan los campos {faltan}",
+                  file=sys.stderr)
+        else:
+            validos.append(d)
+    return validos
 
 
 # ---------- Análisis ----------
@@ -178,21 +288,33 @@ def main():
     usuario = os.environ.get("CLIENTE_USUARIO")
     clave = os.environ.get("CLIENTE_CLAVE")
     if not usuario or not clave:
-        sys.exit("Define CLIENTE_USUARIO y CLIENTE_CLAVE antes de ejecutar.")
+        sys.exit("ERROR: define CLIENTE_USUARIO y CLIENTE_CLAVE antes de ejecutar.")
 
     # 1. Archivos locales (YAML, CSV, XML)
-    config = leer_config(os.path.join(CARPETA_DATOS, "config.yaml"))
-    sedes = leer_sedes(os.path.join(CARPETA_DATOS, "sedes.csv"))
-    politicas = leer_politicas(os.path.join(CARPETA_DATOS, "politicas.xml"))
+    try:
+        config = leer_config(os.path.join(CARPETA_DATOS, "config.yaml"))
+        sedes = leer_sedes(os.path.join(CARPETA_DATOS, "sedes.csv"))
+        politicas = leer_politicas(os.path.join(CARPETA_DATOS, "politicas.xml"))
 
-    api = config["api"]
-    # Las rutas del YAML son relativas a la raíz del repositorio.
-    api["certificado"] = os.path.join(RAIZ, api["certificado"])
-    carpeta_reportes = os.path.join(RAIZ, config["reportes"]["carpeta"])
+        api = config["api"]
+        # Las rutas del YAML son relativas a la raíz del repositorio.
+        api["certificado"] = os.path.join(RAIZ, api["certificado"])
+        carpeta_reportes = os.path.join(RAIZ, config["reportes"]["carpeta"])
+    except FileNotFoundError as error:
+        sys.exit(f"ERROR: no se encontró el archivo {error.filename}")
+    except (yaml.YAMLError, ET.ParseError, csv.Error) as error:
+        sys.exit(f"ERROR: un archivo de datos está mal formado: {error}")
+    except (KeyError, TypeError) as error:
+        sys.exit(f"ERROR: falta un campo esperado en un archivo de datos: {error}")
 
     # 2. Datos de la API (JSON)
-    token = obtener_token(api, usuario, clave)
-    dispositivos = obtener_dispositivos(api, token)
+    try:
+        token = obtener_token(api, usuario, clave)
+        dispositivos = obtener_dispositivos(api, token)
+    except ErrorAPI as error:
+        sys.exit(f"ERROR: {error}")
+
+    dispositivos = validar_dispositivos(dispositivos)
     print(f"Dispositivos recibidos: {len(dispositivos)}")
 
     # 3. Análisis: cruzar las tres fuentes
