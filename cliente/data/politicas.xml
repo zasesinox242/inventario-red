@@ -1,0 +1,7 @@
+<politicas>
+  <estado_permitido>Reachable</estado_permitido>
+  <version_minima plataforma="C9300">17.3</version_minima>
+  <version_minima plataforma="C9200">17.3</version_minima>
+  <version_minima plataforma="C9120">17.3</version_minima>
+  <version_minima plataforma="ISR4331">17.3</version_minima>
+</politicas>
