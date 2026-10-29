@@ -1,6 +1,6 @@
 """API del inventario de red.
 
-Fase 3.2: autenticación. Usuario y clave -> token temporal -> acceso al inventario.
+Fase 3.3: roles. El lector consulta; el admin además puede modificar.
 """
 import json
 import os
@@ -8,7 +8,7 @@ import secrets
 import time
 from functools import wraps
 
-from flask import Flask, jsonify, request
+from flask import Flask, g, jsonify, request
 from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
@@ -33,6 +33,7 @@ USUARIOS = {
 
 DURACION_TOKEN = 900  # segundos (15 minutos)
 TOKENS = {}  # token -> {"usuario", "rol", "expira"}; vive en memoria
+ESTADOS_VALIDOS = ("Reachable", "Unreachable")
 
 
 def cargar_dispositivos():
@@ -41,16 +42,33 @@ def cargar_dispositivos():
         return json.load(archivo)
 
 
+# El inventario se carga una vez al arrancar; los cambios viven en memoria.
+DISPOSITIVOS = cargar_dispositivos()
+
+
 def requiere_token(funcion):
-    """Decorador: solo deja pasar si la petición trae un token válido y vigente."""
+    """Decorador: solo deja pasar si hay un token válido y vigente (si no, 401)."""
     @wraps(funcion)
     def envoltura(*args, **kwargs):
         token = request.headers.get("X-Auth-Token")
-        datos = TOKENS.get(token)
-        if datos is None or datos["expira"] < time.time():
+        sesion = TOKENS.get(token)
+        if sesion is None or sesion["expira"] < time.time():
             return jsonify({"error": "Token ausente, inválido o vencido"}), 401
+        g.sesion = sesion  # queda disponible para el resto de la petición
         return funcion(*args, **kwargs)
     return envoltura
+
+
+def requiere_rol(rol_necesario):
+    """Decorador: exige un rol concreto (si no lo tiene, 403)."""
+    def decorador(funcion):
+        @wraps(funcion)
+        def envoltura(*args, **kwargs):
+            if g.sesion["rol"] != rol_necesario:
+                return jsonify({"error": "No tienes permiso para esta acción"}), 403
+            return funcion(*args, **kwargs)
+        return envoltura
+    return decorador
 
 
 @app.errorhandler(404)
@@ -90,16 +108,32 @@ def emitir_token():
 @requiere_token
 def listar_dispositivos():
     """Devuelve todos los dispositivos del inventario."""
-    dispositivos = cargar_dispositivos()
-    return jsonify({"total": len(dispositivos), "dispositivos": dispositivos})
+    return jsonify({"total": len(DISPOSITIVOS), "dispositivos": DISPOSITIVOS})
 
 
 @app.route("/api/v1/dispositivos/<int:id_dispositivo>")
 @requiere_token
 def obtener_dispositivo(id_dispositivo):
     """Devuelve un dispositivo por su id, o 404 si no existe."""
-    for dispositivo in cargar_dispositivos():
+    for dispositivo in DISPOSITIVOS:
         if dispositivo["id"] == id_dispositivo:
+            return jsonify(dispositivo)
+    return jsonify({"error": "Dispositivo no encontrado"}), 404
+
+
+@app.route("/api/v1/dispositivos/<int:id_dispositivo>", methods=["PATCH"])
+@requiere_token
+@requiere_rol("admin")
+def actualizar_dispositivo(id_dispositivo):
+    """Cambia el estado de un dispositivo. Solo el rol admin (403 si no)."""
+    cuerpo = request.get_json(silent=True)
+    if not isinstance(cuerpo, dict) or cuerpo.get("estado") not in ESTADOS_VALIDOS:
+        return jsonify({"error": "Cuerpo inválido: se espera "
+                                 '{"estado": "Reachable" o "Unreachable"}'}), 400
+
+    for dispositivo in DISPOSITIVOS:
+        if dispositivo["id"] == id_dispositivo:
+            dispositivo["estado"] = cuerpo["estado"]
             return jsonify(dispositivo)
     return jsonify({"error": "Dispositivo no encontrado"}), 404
 
