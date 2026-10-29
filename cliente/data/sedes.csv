@@ -1,0 +1,8 @@
+hostname,sede,criticidad,responsable
+sw-core-01,Almacen-Central,alta,Equipo Redes
+sw-acceso-02,Almacen-Central,media,Soporte TI
+rtr-borde-01,Almacen-Central,alta,Equipo Redes
+ap-almacen-01,Almacen-Central,baja,Soporte TI
+sw-suc-norte-01,Sucursal-Norte,media,Soporte TI
+rtr-suc-norte-01,Sucursal-Norte,alta,Equipo Redes
+sw-suc-sur-01,Sucursal-Sur,media,Soporte TI

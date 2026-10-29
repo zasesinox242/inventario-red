@@ -1,0 +1,6 @@
+api:
+  url_base: https://api-inventario:5000/api/v1
+  timeout: 10
+  certificado: servidor/certs/cert.pem
+reportes:
+  carpeta: cliente/reports
